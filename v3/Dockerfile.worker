@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies (if any needed for sniffing – worker doesn't sniff, but may need libpcap for model? Not required)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Worker doesn't expose ports; it only consumes from Kafka and writes to Redis
+CMD ["python", "-m", "worker.consumer"]
