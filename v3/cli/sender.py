@@ -98,6 +98,8 @@ class WindowSender:
             resp.raise_for_status()
             window_id = resp.json()["window_id"]
             logger.debug("Sent window %s (%d queries)", window_id[:8], features.query_count)
+            print("features: "+str(features.to_dict()))
+            print("window_id: "+window_id)
             return window_id
         except httpx.TimeoutException:
             logger.warning("POST /ingest timed out — window dropped.")
@@ -130,6 +132,8 @@ class WindowSender:
                             self.history_logger.log(features, label, confidence)
 
                         logger.debug("Result %s → %s (%.2f)", window_id[:8], label, confidence)
+                        print("Result for window %s: %s (confidence %.2f)" % (window_id[:8], label, confidence))
+                        print("--------------------------------------------------------")
                         return
 
                 except httpx.TimeoutException:

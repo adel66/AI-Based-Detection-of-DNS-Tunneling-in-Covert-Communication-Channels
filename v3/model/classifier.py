@@ -126,6 +126,7 @@ class DNS_Ensemble_Model:
     def predict_score(self, X):
         """Return raw ensemble score (before thresholding)."""
         X        = self._ensure_feature_order(X)
+        print(X)
         X_scaled = self.scaler.transform(X)
 
         xgb_score = self.xgb.predict_proba(X_scaled)[:, 1]
@@ -275,7 +276,7 @@ class HeuristicClassifier(BaseClassifier):
 
         if score >= 0.40:
             return "malicious", round(score, 4)
-        return "benign", round(1.0 - score, 4)
+        return "benignn", round(1.0 - score, 4)
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
