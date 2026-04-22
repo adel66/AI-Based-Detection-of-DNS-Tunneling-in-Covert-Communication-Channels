@@ -147,6 +147,8 @@ def _extract_event(packet) -> DomainEvent | None:
         resp_len      = pkt_len if qr else 0
         is_large_resp = resp_len > _LARGE_RESP_THRESHOLD
 
+        print("subdoamin: "+domain)
+
         return DomainEvent(
             domain=domain,
             timestamp=datetime.now(),

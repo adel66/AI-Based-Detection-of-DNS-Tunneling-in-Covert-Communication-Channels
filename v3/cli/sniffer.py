@@ -72,7 +72,6 @@ class DNSSniffer:
         """
         try:
             if packet.haslayer(DNS) and packet[DNS].qr == 0 and packet.haslayer(DNSQR):
-                print("DEBUG: DNS query captured") 
                 self.packet_count += 1
                 self.packet_queue.put(packet)
         except Exception as exc:

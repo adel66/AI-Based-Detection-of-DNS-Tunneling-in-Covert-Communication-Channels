@@ -122,9 +122,15 @@ class DNSWindowWorker:
     """Kafka consumer + ML inference worker. Blocks until stopped."""
 
     def __init__(self) -> None:
+        print(">>> INIT START", flush=True)
         self._running  = True
+        print(">>> LOADING CLASSIFIER", flush=True)
         self._clf      = load_classifier()
+        print(">>> CLASSIFIER LOADED", flush=True)
+        print(">>> INIT STORE", flush=True)
         self._store    = SyncResultStore()
+        print(">>> STORE READY", flush=True)
+        
         self._executor = ThreadPoolExecutor(
             max_workers=worker_cfg.inference_threads,
             thread_name_prefix="inference",
@@ -137,6 +143,8 @@ class DNSWindowWorker:
         self._running = False
 
     def run(self) -> None:
+        print(">>> ENTERED RUN", flush=True)
+
         logger.info("Worker starting — topic=%s group=%s threads=%d",
                     kafka_cfg.topic, kafka_cfg.consumer_group, worker_cfg.inference_threads)
 
