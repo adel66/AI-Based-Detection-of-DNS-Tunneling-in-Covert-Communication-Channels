@@ -64,7 +64,7 @@ class RedisConfig:
 class APIConfig:
     host:     str = field(default_factory=lambda: _str("API_HOST",     "0.0.0.0"))
     port:     int = field(default_factory=lambda: _int("API_PORT",     8000))
-    base_url: str = field(default_factory=lambda: _str("API_BASE_URL", "http://192.168.43.179:8000"))
+    base_url: str = field(default_factory=lambda: _str("API_BASE_URL", "http://217.65.146.96:8000"))
 
 
 # ── Worker ────────────────────────────────────────────────────────────────────

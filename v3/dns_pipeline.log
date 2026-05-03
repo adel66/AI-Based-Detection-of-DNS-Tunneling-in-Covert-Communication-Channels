@@ -2595,3 +2595,8 @@
 2026-04-19 20:23:54,189 [INFO] api.main: API shutting down…
 2026-04-19 20:23:54,191 [INFO] api.kafka_producer: KafkaProducer closed.
 2026-04-19 20:23:54,193 [INFO] api.main: API stopped.
+2026-05-03 19:06:50,306 [INFO] shared.logging_setup: Logging configured — service=cli level=INFO
+2026-05-03 19:07:13,233 [INFO] shared.logging_setup: Logging configured — service=cli level=INFO
+2026-05-03 19:07:32,809 [INFO] shared.logging_setup: Logging configured — service=cli level=INFO
+2026-05-03 19:08:27,152 [INFO] shared.logging_setup: Logging configured — service=cli level=INFO
+2026-05-03 19:10:30,683 [INFO] shared.logging_setup: Logging configured — service=cli level=INFO
