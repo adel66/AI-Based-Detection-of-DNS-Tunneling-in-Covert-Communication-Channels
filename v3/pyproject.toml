@@ -18,7 +18,10 @@ dependencies = [
     "scikit-learn (>=1.4.0)",
     "numpy (>=1.26.0)",
     "scapy (>=2.5.0)",
-    "rich (>=13.7.0)"
+    "rich (>=13.7.0)",
+    "xgboost (>=1.7.0)",
+    "joblib (>=1.3.0)",
+    "pandas (>=2.0.0)"
 ]
 
 

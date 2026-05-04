@@ -11,7 +11,7 @@ Message format on the wire (JSON):
     {
         "window_id":  "<uuid>",
         "agent_id":   "<hostname>",
-        "features":   { ... all 16 feature fields ... },
+        "features":   { ... all 19 model feature fields ... },
         "window_start": "<ISO datetime>",
         "window_end":   "<ISO datetime>"
     }
@@ -35,6 +35,7 @@ from kafka.errors import KafkaError
 
 from api.schemas import IngestRequest
 from shared.config import kafka as cfg
+from shared.feature_contract import FEATURE_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -111,17 +112,7 @@ class WindowKafkaProducer:
             "agent_id":     payload.agent_id,
             "window_start": payload.window_start.isoformat(),
             "window_end":   payload.window_end.isoformat(),
-            "features":     payload.model_dump(
-                # Only the 16 numeric feature fields
-                include={
-                    "query_count", "unique_domain_count", "unique_ratio",
-                    "domain_entropy", "mean_per_domain_entropy",
-                    "high_entropy_domain_ratio", "mean_qname_length",
-                    "std_qname_length", "max_qname_length", "tld_diversity",
-                    "suspicious_tld_ratio", "mean_digit_ratio",
-                    "mean_vowel_ratio", "inter_query_std",
-                }
-            ),
+            "features":     payload.model_dump(include=FEATURE_FIELDS),
         }
 
         future = self._producer.send(

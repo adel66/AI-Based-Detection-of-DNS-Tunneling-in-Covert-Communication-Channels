@@ -28,6 +28,7 @@ import pickle
 from abc import ABC, abstractmethod
 
 from shared.config import worker as worker_cfg
+from shared.feature_contract import FEATURE_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -36,27 +37,7 @@ _LABEL_MAP: dict[int, str] = {0: "benign", 1: "malicious"}
 
 # The 19 feature column names in the exact order of WindowFeatures.to_vector().
 # These names must match the DataFrame columns the ensemble was trained on.
-_FEATURE_COLUMNS: list[str] = [
-    "query_count",
-    "response_count",
-    "avg_packet_length",
-    "std_packet_length",
-    "avg_entropy",
-    "max_entropy",
-    "avg_qname_len",
-    "max_qname_len",
-    "avg_digit_ratio",
-    "avg_special_ratio",
-    "unique_subdomains",
-    "unique_qtypes",
-    "txt_ratio",
-    "large_resp_ratio",
-    "avg_ttl",
-    "avg_max_label_len",
-    "answer_sum",
-    "resp_len_avg",
-    "event_count",
-]
+_FEATURE_COLUMNS: list[str] = list(FEATURE_KEYS)
 
 
 # ── Abstract interface ────────────────────────────────────────────────────────
@@ -90,7 +71,7 @@ class DNS_Ensemble_Model:
     Loaded from a joblib bundle containing:
         xgb_model       — XGBoost classifier
         iso_model       — IsolationForest anomaly detector
-        scaler          — fitted StandardScaler
+        scaler          — fitted StandardScaler (kept for bundle compatibility)
         feature_columns — ordered list of column names (used for alignment)
         weights         — {"xgb": float, "iso": float}
         threshold       — float decision boundary on the ensemble score
@@ -101,7 +82,7 @@ class DNS_Ensemble_Model:
         bundle = joblib.load(bundle_path)
         self.xgb             = bundle["xgb_model"]
         self.iso             = bundle["iso_model"]
-        self.scaler          = bundle["scaler"]
+        self.scaler          = bundle.get("scaler")
         self.feature_columns = bundle["feature_columns"]
         self.weights         = bundle["weights"]
         self.threshold       = bundle["threshold"]
@@ -114,32 +95,30 @@ class DNS_Ensemble_Model:
         """Reorder DataFrame columns to match training order."""
         return X[self.feature_columns]
 
-    @staticmethod
-    def _minmax_scale(arr):
-        import numpy as np
-        arr = np.asarray(arr, dtype=float)
-        mn, mx = arr.min(), arr.max()
-        if mx - mn == 0:
-            return np.zeros_like(arr)
-        return (arr - mn) / (mx - mn)
-
     def predict_score(self, X):
-        """Return raw ensemble score (before thresholding)."""
-        X        = self._ensure_feature_order(X)
-        print(X)
-        X_scaled = self.scaler.transform(X)
+        """
+        Return a streaming-safe ensemble score.
 
-        xgb_score = self.xgb.predict_proba(X_scaled)[:, 1]
+        The notebook trained and scored both models on raw feature values.
+        Its min-max normalization was applied over an entire test batch; doing
+        that for one live window always yields zero. For production inference,
+        use the supervised XGBoost probability directly and let the
+        IsolationForest binary anomaly decision raise the score when a window
+        is outside the learned benign distribution.
+        """
+        import numpy as np
 
-        iso_raw   = self.iso.decision_function(X_scaled)
-        iso_score = -iso_raw   # invert: higher = more anomalous
+        X = self._ensure_feature_order(X)
 
-        xgb_score_n = self._minmax_scale(xgb_score)
-        iso_score_n = self._minmax_scale(iso_score)
+        xgb_score = self.xgb.predict_proba(X)[:, 1]
+        iso_score = np.where(self.iso.predict(X) == -1, 1.0, 0.0)
 
         w_xgb = self.weights["xgb"]
         w_iso  = self.weights["iso"]
-        return (w_xgb * xgb_score_n) + (w_iso * iso_score_n)
+        weighted_score = (w_xgb * xgb_score) + (w_iso * iso_score)
+
+        # Keep XGBoost effective even when the IsolationForest says "normal".
+        return np.maximum(xgb_score, weighted_score)
 
     def predict(self, X):
         import numpy as np
@@ -171,8 +150,6 @@ class EnsembleClassifier(BaseClassifier):
         raw_label = int(self._model.predict(X)[0])
         label     = _LABEL_MAP.get(raw_label, "benign")
 
-        # Confidence: distance from threshold, normalised to [0, 1]
-        # score is already in [0, 1] range after minmax normalisation
         if raw_label == 1:          # malicious
             confidence = round(min(score, 1.0), 4)
         else:                       # benign
@@ -276,7 +253,7 @@ class HeuristicClassifier(BaseClassifier):
 
         if score >= 0.40:
             return "malicious", round(score, 4)
-        return "benignn", round(1.0 - score, 4)
+        return "benign", round(1.0 - score, 4)
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────

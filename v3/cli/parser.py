@@ -22,7 +22,7 @@ max_label_len   int   length of the longest dot-separated label
 ttl             float mean TTL across all answer records (0 if no answers)
 answer_count    int   DNS ancount field
 response_length int   packet length if is_response else 0
-is_large_resp   bool  response_length > 512
+is_large_resp   bool  response_length > 300
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ from scapy.all import DNS, DNSQR, DNSRR
 
 logger = logging.getLogger(__name__)
 
-# DNS responses larger than this are flagged as large
-_LARGE_RESP_THRESHOLD = 512
+# Matches the training notebook's response_length > 300 feature.
+_LARGE_RESP_THRESHOLD = 300
 
 
 # ── Helper functions (exact match to AI team's implementation) ────────────────

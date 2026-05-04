@@ -25,6 +25,7 @@ from kafka.errors import KafkaError, NoBrokersAvailable
 from api.cache import SyncResultStore
 from model.classifier import BaseClassifier, load_classifier
 from shared.config import kafka as kafka_cfg, worker as worker_cfg
+from shared.feature_contract import build_feature_vector
 from shared.logging_setup import configure_logging
 
 configure_logging("worker")
@@ -69,30 +70,7 @@ def _build_feature_vector(features: dict) -> list[float]:
     Reconstruct the 19-element feature vector from the JSON message.
     Order matches WindowFeatures.to_vector() and the training tuple exactly.
     """
-    def f(key: str) -> float:
-        return float(features.get(key, 0.0))
-
-    return [
-        f("query_count"),
-        f("response_count"),
-        f("avg_packet_length"),
-        f("std_packet_length"),
-        f("avg_entropy"),
-        f("max_entropy"),
-        f("avg_qname_len"),
-        f("max_qname_len"),
-        f("avg_digit_ratio"),
-        f("avg_special_ratio"),
-        f("unique_subdomains"),
-        f("unique_qtypes"),
-        f("txt_ratio"),
-        f("large_resp_ratio"),
-        f("avg_ttl"),
-        f("avg_max_label_len"),
-        f("answer_sum"),
-        f("resp_len_avg"),
-        f("event_count"),
-    ]
+    return build_feature_vector(features)
 
 
 # ── Per-message processing ────────────────────────────────────────────────────

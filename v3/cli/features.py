@@ -123,7 +123,7 @@ def _mean(values: list) -> float:
     return statistics.mean(values) if values else 0.0
 
 def _std(values: list) -> float:
-    return statistics.pstdev(values) if len(values) >= 2 else 0.0
+    return statistics.stdev(values) if len(values) >= 2 else 0.0
 
 def _max(values: list) -> float:
     return float(max(values)) if values else 0.0
