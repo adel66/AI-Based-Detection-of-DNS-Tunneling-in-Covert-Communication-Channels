@@ -28,6 +28,17 @@ Column abbreviations (match training feature names)
   AnsΣ  answer_sum              RLen  resp_len_avg
   Ev    event_count
   Label  /  Cf (confidence)
+
+Threat detection
+----------------
+When THREAT_THRESHOLD or more consecutive windows are labelled "malicious",
+the dashboard:
+  1. Injects a red ⚠ DNS TUNNELLING THREAT banner row after the streak.
+  2. Logs a CRITICAL message via the standard logger.
+  3. Appends a timestamped entry to THREAT_LOG_PATH (alerts.log by default).
+  4. Sets self.threat_event (threading.Event) so external code can react.
+
+Change THREAT_THRESHOLD to tune sensitivity.
 """
 
 from __future__ import annotations
@@ -38,9 +49,10 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
+from pathlib import Path
 
 from rich import box
 from rich.console import Console
@@ -53,18 +65,32 @@ from shared.config import cli as cli_cfg
 
 logger = logging.getLogger(__name__)
 
-_HEADER_LINES      = 5   # panel border + 3 content lines + border
+# ── Threat detection config ───────────────────────────────────────────────────
+
+# Number of consecutive malicious windows that triggers a threat alert.
+THREAT_THRESHOLD: int = 3
+
+# Path to the append-only alert log written on each new threat streak.
+THREAT_LOG_PATH: Path = Path("alerts.log")
+
+
+# ── Layout constants ──────────────────────────────────────────────────────────
+
+_HEADER_LINES       = 5   # panel border + 3 content lines + border
 _TABLE_HEADER_LINES = 2   # column headers + separator
 
 
 # ── Label styles ──────────────────────────────────────────────────────────────
 
 _LABEL_STYLE: dict[str, tuple[str, str]] = {
-    "benign":    ("[green]✅ benign[/green]",      "green"),
-    "malicious": ("[red]❌ malicious[/red]",        "red"),
-    "unknown":   ("[cyan]❓ unknown[/cyan]",         "cyan"),
-    "pending":   ("[dim]⏳ pending[/dim]",          "dim"),
+    "benign":    ("[green]✅ benign[/green]",    "green"),
+    "malicious": ("[red]❌ malicious[/red]",      "red"),
+    "unknown":   ("[cyan]❓ unknown[/cyan]",       "cyan"),
+    "pending":   ("[dim]⏳ pending[/dim]",        "dim"),
 }
+
+# Sentinel used as a fake WindowRow to mark where threat banners are injected.
+_THREAT_BANNER = object()
 
 
 # ── Window row model ──────────────────────────────────────────────────────────
@@ -150,6 +176,14 @@ class Dashboard:
     Fixed-frame dashboard showing all 19 training features per window row.
 
     Thread safety: _lock protects _rows and _index.
+
+    Public attributes
+    -----------------
+    threat_event : threading.Event
+        Set every time a new DNS tunnelling threat streak is detected.
+        External code can call ``threat_event.wait()`` or check
+        ``threat_event.is_set()``.  The event is *not* cleared automatically
+        so callers can clear it themselves after handling if needed.
     """
 
     def __init__(
@@ -169,6 +203,13 @@ class Dashboard:
         self._lock  = threading.Lock()
         self._rows:  deque[WindowRow]     = deque(maxlen=500)
         self._index: dict[str, WindowRow] = {}
+
+        # Threat state — tracks the window_id of the last row that was the
+        # *end* of a reported streak so we don't re-fire for the same streak.
+        self._last_threat_window_id: str | None = None
+
+        # Public event: set whenever a new threat is detected.
+        self.threat_event: threading.Event = threading.Event()
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -219,6 +260,76 @@ class Dashboard:
         con.print("[dim]Full history → dns_windows.tsv[/dim]")
         con.print()
 
+    # ── threat detection ──────────────────────────────────────────────────────
+
+    def _check_threat(self, rows: list[WindowRow]) -> list[int]:
+        """
+        Scan *rows* for runs of THREAT_THRESHOLD+ consecutive malicious
+        windows.  Returns a list of indices (into *rows*) at which a threat
+        banner should be injected (i.e. the index *after* each streak's last
+        row — we insert the banner between that row and the next).
+
+        Also fires _fire_threat_alert() for any streak whose tail window_id
+        has not been reported yet.
+
+        Called with the lock already held (rows is a snapshot).
+        """
+        banner_after: list[int] = []   # row indices after which to insert banner
+        streak = 0
+        streak_start = 0
+
+        for i, row in enumerate(rows):
+            if row.label == "malicious":
+                if streak == 0:
+                    streak_start = i
+                streak += 1
+                if streak == THREAT_THRESHOLD:
+                    # First time we hit the threshold in this streak — record
+                    # the banner position.  We'll extend the streak but only
+                    # insert one banner per run.
+                    banner_after.append(i)
+            else:
+                streak = 0
+
+        # Fire alerts for each streak whose tail is new.
+        # We re-walk to find streaks properly (banner_after holds last indices).
+        for tail_idx in banner_after:
+            tail_id = rows[tail_idx].window_id
+            if tail_id != self._last_threat_window_id:
+                self._last_threat_window_id = tail_id
+                # Fire outside the lock to avoid potential deadlock with logging
+                # handlers, but we're already inside _lock here — that's fine
+                # because _fire_threat_alert only does I/O.
+                self._fire_threat_alert(rows[tail_idx].window_time)
+
+        return banner_after
+
+    def _fire_threat_alert(self, at: datetime) -> None:
+        """
+        Side-effects triggered on a new threat streak:
+          1. CRITICAL log entry.
+          2. Append to THREAT_LOG_PATH.
+          3. Set self.threat_event.
+        """
+        ts  = at.strftime("%Y-%m-%d %H:%M:%S")
+        msg = (
+            f"[THREAT] DNS Tunnelling detected — "
+            f"{THREAT_THRESHOLD}+ consecutive malicious windows at {ts}"
+        )
+
+        # 1. Logger
+        logger.critical(msg)
+
+        # 2. alerts.log
+        try:
+            with THREAT_LOG_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(msg + "\n")
+        except OSError as exc:
+            logger.error("Could not write to %s: %s", THREAT_LOG_PATH, exc)
+
+        # 3. threading.Event for external consumers
+        self.threat_event.set()
+
     # ── rendering ─────────────────────────────────────────────────────────────
 
     def _uptime(self) -> str:
@@ -253,10 +364,10 @@ class Dashboard:
             ("   Packets: ", "dim"), (f"{pkts:,}",    "cyan"),
         )
         line3 = Text.assemble(
-            ("  Windows: ",     "dim"), (str(counts["total"]),     "cyan"),
-            ("   ✅ Benign: ",  "dim"), (str(counts["benign"]),    "green"),
+            ("  Windows: ",      "dim"), (str(counts["total"]),     "cyan"),
+            ("   ✅ Benign: ",   "dim"), (str(counts["benign"]),    "green"),
             ("   ❌ Malicious: ","dim"), (str(counts["malicious"]), "red"),
-            ("   ⏳ Pending: ", "dim"), (str(counts["pending"]),   "dim"),
+            ("   ⏳ Pending: ",  "dim"), (str(counts["pending"]),   "dim"),
             ("   History → dns_windows.tsv", "dim"),
         )
         return Panel(
@@ -276,35 +387,42 @@ class Dashboard:
         )
 
         # ── Columns ───────────────────────────────────────────────────────────
-        tbl.add_column("Time",   style="dim",      width=9,  no_wrap=True)
-        tbl.add_column("Q",      justify="right",  width=5,  no_wrap=True)   # query_count
-        tbl.add_column("R",      justify="right",  width=5,  no_wrap=True)   # response_count
-        tbl.add_column("Pkt",    justify="right",  width=6,  no_wrap=True)   # avg_packet_length
-        tbl.add_column("sPkt",   justify="right",  width=5,  no_wrap=True)   # std_packet_length
-        tbl.add_column("Ent",    justify="right",  width=5,  no_wrap=True)   # avg_entropy
-        tbl.add_column("xEnt",   justify="right",  width=5,  no_wrap=True)   # max_entropy
-        tbl.add_column("QLen",   justify="right",  width=5,  no_wrap=True)   # avg_qname_len
-        tbl.add_column("xQL",    justify="right",  width=4,  no_wrap=True)   # max_qname_len
-        tbl.add_column("DR",     justify="right",  width=5,  no_wrap=True)   # avg_digit_ratio
-        tbl.add_column("SR",     justify="right",  width=5,  no_wrap=True)   # avg_special_ratio
-        tbl.add_column("USub",   justify="right",  width=5,  no_wrap=True)   # unique_subdomains
-        tbl.add_column("UQt",    justify="right",  width=4,  no_wrap=True)   # unique_qtypes
-        tbl.add_column("TXT%",   justify="right",  width=5,  no_wrap=True)   # txt_ratio
-        tbl.add_column("LR%",    justify="right",  width=5,  no_wrap=True)   # large_resp_ratio
-        tbl.add_column("TTL",    justify="right",  width=6,  no_wrap=True)   # avg_ttl
-        tbl.add_column("ML",     justify="right",  width=5,  no_wrap=True)   # avg_max_label_len
-        tbl.add_column("AnsΣ",   justify="right",  width=5,  no_wrap=True)   # answer_sum
-        tbl.add_column("RLen",   justify="right",  width=5,  no_wrap=True)   # resp_len_avg
-        tbl.add_column("Ev",     justify="right",  width=4,  no_wrap=True)   # event_count
-        tbl.add_column("Label",  width=14,         no_wrap=True)
-        tbl.add_column("Cf",     justify="right",  width=5,  no_wrap=True)   # confidence
+        tbl.add_column("Time",  style="dim",     width=9,  no_wrap=True)
+        tbl.add_column("Q",     justify="right", width=5,  no_wrap=True)
+        tbl.add_column("R",     justify="right", width=5,  no_wrap=True)
+        tbl.add_column("Pkt",   justify="right", width=6,  no_wrap=True)
+        tbl.add_column("sPkt",  justify="right", width=5,  no_wrap=True)
+        tbl.add_column("Ent",   justify="right", width=5,  no_wrap=True)
+        tbl.add_column("xEnt",  justify="right", width=5,  no_wrap=True)
+        tbl.add_column("QLen",  justify="right", width=5,  no_wrap=True)
+        tbl.add_column("xQL",   justify="right", width=4,  no_wrap=True)
+        tbl.add_column("DR",    justify="right", width=5,  no_wrap=True)
+        tbl.add_column("SR",    justify="right", width=5,  no_wrap=True)
+        tbl.add_column("USub",  justify="right", width=5,  no_wrap=True)
+        tbl.add_column("UQt",   justify="right", width=4,  no_wrap=True)
+        tbl.add_column("TXT%",  justify="right", width=5,  no_wrap=True)
+        tbl.add_column("LR%",   justify="right", width=5,  no_wrap=True)
+        tbl.add_column("TTL",   justify="right", width=6,  no_wrap=True)
+        tbl.add_column("ML",    justify="right", width=5,  no_wrap=True)
+        tbl.add_column("AnsΣ",  justify="right", width=5,  no_wrap=True)
+        tbl.add_column("RLen",  justify="right", width=5,  no_wrap=True)
+        tbl.add_column("Ev",    justify="right", width=4,  no_wrap=True)
+        tbl.add_column("Label", width=14,        no_wrap=True)
+        tbl.add_column("Cf",    justify="right", width=5,  no_wrap=True)
+
+        # Number of columns — used for the full-width threat banner.
+        _NCOLS = 22
 
         with self._lock:
             visible = list(self._rows)[-max_rows:]
+            banner_after = self._check_threat(visible)
 
-        for row in visible:
+        banner_set = set(banner_after)   # O(1) lookup
+
+        for i, row in enumerate(visible):
             markup, _ = _LABEL_STYLE.get(row.label, ("?", "white"))
             cf = f"{row.confidence:.2f}" if row.label not in ("pending", "unknown") else "—"
+
             tbl.add_row(
                 row.window_time.strftime("%H:%M:%S"),
                 str(row.query_count),
@@ -330,6 +448,22 @@ class Dashboard:
                 cf,
             )
 
+            # Inject threat banner row immediately after the streak's last row.
+            if i in banner_set:
+                banner_text = Text.assemble(
+                    ("⚠  DNS TUNNELLING THREAT DETECTED  —  "
+                     f"{THREAT_THRESHOLD} consecutive malicious windows  ⚠",
+                     "bold white on red"),
+                )
+                # Span the banner across all columns by putting it in the first
+                # cell and leaving the rest empty.
+                tbl.add_row(
+                    banner_text,
+                    *[""] * (_NCOLS - 1),
+                    style="on red",
+                    end_section=True,
+                )
+
         return tbl
 
     def _render_loop(self) -> None:
@@ -345,8 +479,8 @@ class Dashboard:
                 cols, rows = _term_size()
                 data_rows  = max(1, rows - _HEADER_LINES - _TABLE_HEADER_LINES - 2)
 
-                header_lines = _render(self._build_header(cols),       width=cols)
-                table_lines  = _render(self._build_table(data_rows),   width=cols)
+                header_lines = _render(self._build_header(cols),     width=cols)
+                table_lines  = _render(self._build_table(data_rows), width=cols)
                 all_lines    = header_lines + table_lines
 
                 frame = "\033[H"
