@@ -162,9 +162,14 @@ def _term_size() -> tuple[int, int]:
 
 
 def _render(renderable, *, width: int) -> list[str]:
-    """Render a Rich renderable to a list of plain text lines."""
+    """Render a Rich renderable to a list of ANSI-escaped lines.
+
+    force_terminal=True is required — without it Rich detects a StringIO
+    and silently strips every ANSI colour sequence, leaving plain white text.
+    """
     buf = StringIO()
-    con = Console(file=buf, width=width, highlight=False, markup=True)
+    con = Console(file=buf, width=width, highlight=False,
+                  markup=True, force_terminal=True)
     con.print(renderable)
     return buf.getvalue().splitlines()
 
@@ -283,7 +288,7 @@ class Dashboard:
                 if streak == 0:
                     streak_start = i
                 streak += 1
-                if streak == THREAT_THRESHOLD:
+                if streak % THREAT_THRESHOLD == 0:
                     # First time we hit the threshold in this streak — record
                     # the banner position.  We'll extend the streak but only
                     # insert one banner per run.
@@ -376,7 +381,17 @@ class Dashboard:
             padding=(0, 1),
         )
 
-    def _build_table(self, max_rows: int) -> Table:
+    def _build_table(self, max_rows: int) -> tuple[Table, set[int]]:
+        """
+        Returns (table, banner_after_set) where banner_after_set contains the
+        0-based data-row indices (within the visible slice) after which a
+        threat banner line should be spliced in by the caller.
+
+        We deliberately do NOT add the banner inside the Table — Rich cannot
+        span columns, and a row-level style always overrides cell markup,
+        so any attempt to colour a fake row ends up white and truncated.
+        The render loop splices the banner in as a raw ANSI line instead.
+        """
         tbl = Table(
             box=box.SIMPLE_HEAD,
             show_header=True,
@@ -410,19 +425,13 @@ class Dashboard:
         tbl.add_column("Label", width=14,        no_wrap=True)
         tbl.add_column("Cf",    justify="right", width=5,  no_wrap=True)
 
-        # Number of columns — used for the full-width threat banner.
-        _NCOLS = 22
-
         with self._lock:
             visible = list(self._rows)[-max_rows:]
             banner_after = self._check_threat(visible)
 
-        banner_set = set(banner_after)   # O(1) lookup
-
-        for i, row in enumerate(visible):
+        for row in visible:
             markup, _ = _LABEL_STYLE.get(row.label, ("?", "white"))
             cf = f"{row.confidence:.2f}" if row.label not in ("pending", "unknown") else "—"
-
             tbl.add_row(
                 row.window_time.strftime("%H:%M:%S"),
                 str(row.query_count),
@@ -448,40 +457,61 @@ class Dashboard:
                 cf,
             )
 
-            # Inject threat banner row immediately after the streak's last row.
-            if i in banner_set:
-                banner_text = Text.assemble(
-                    ("⚠  DNS TUNNELLING THREAT DETECTED  —  "
-                     f"{THREAT_THRESHOLD} consecutive malicious windows  ⚠",
-                     "bold white on red"),
-                )
-                # Span the banner across all columns by putting it in the first
-                # cell and leaving the rest empty.
-                tbl.add_row(
-                    banner_text,
-                    *[""] * (_NCOLS - 1),
-                    style="on red",
-                    end_section=True,
-                )
+        return tbl, set(banner_after)
 
-        return tbl
+    def _threat_banner_line(self, width: int) -> str:
+        """
+        Build a full-width bold-red banner as a raw ANSI escape string.
+
+        We deliberately avoid Rich here: even with force_terminal=True, Rich
+        pads/clips to its internal column model and may still mis-centre
+        Unicode-heavy strings.  A raw ANSI string is immune to all of that —
+        the terminal renders it at exactly `width` visible characters.
+
+        ANSI codes used:
+          \033[1;31m  — bold + red foreground
+          \033[0m     — reset all attributes
+        """
+        msg    = f"⚠  DNS TUNNELLING THREAT  —  {THREAT_THRESHOLD} consecutive malicious windows  ⚠"
+        # Truncate if somehow wider than the terminal (very narrow window)
+        if len(msg) > width:
+            msg = msg[:width]
+        centered = msg.center(width)
+        return f"\033[1;31m{centered}\033[0m"
 
     def _render_loop(self) -> None:
         """
         Cursor-home fixed-frame render loop.
 
-        \033[H   moves cursor to top-left (scroll buffer untouched)
-        \033[K   erases each line to EOL  (handles line shortening)
-        \033[J   erases below last line   (handles table shrinkage)
+        Banner splicing
+        ---------------
+        _build_table returns (table, banner_after_set).  After rendering the
+        table to lines we insert the full-width red banner line directly after
+        the matching data row.  This bypasses Rich's column-width constraints
+        entirely, giving us true full-width colour.
         """
         while self._running:
             try:
                 cols, rows = _term_size()
                 data_rows  = max(1, rows - _HEADER_LINES - _TABLE_HEADER_LINES - 2)
 
-                header_lines = _render(self._build_header(cols),     width=cols)
-                table_lines  = _render(self._build_table(data_rows), width=cols)
-                all_lines    = header_lines + table_lines
+                header_lines = _render(self._build_header(cols), width=cols)
+
+                table, banner_after_set = self._build_table(data_rows)
+                table_lines = _render(table, width=cols)
+
+                # Splice banner lines in.
+                # table_lines layout: [header-line, separator-line, row0, row1, ...]
+                # Data row i sits at table_lines index i + _TABLE_HEADER_LINES.
+                if banner_after_set:
+                    banner_line = self._threat_banner_line(cols)
+                    # Work highest-index first so earlier insertions don't shift later ones.
+                    for idx in sorted(banner_after_set, reverse=True):
+                        insert_at = idx + _TABLE_HEADER_LINES + 1   # +1 = after the row
+                        if insert_at <= len(table_lines):
+                            table_lines.insert(insert_at, banner_line)
+
+                all_lines = header_lines + table_lines
 
                 frame = "\033[H"
                 for line in all_lines[:rows - 1]:
