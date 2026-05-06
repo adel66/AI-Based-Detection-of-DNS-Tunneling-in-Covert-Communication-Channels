@@ -525,3 +525,6 @@ class Dashboard:
                 logger.debug("Render error (non-fatal): %s", exc)
 
             time.sleep(self._refresh_s)
+
+
+

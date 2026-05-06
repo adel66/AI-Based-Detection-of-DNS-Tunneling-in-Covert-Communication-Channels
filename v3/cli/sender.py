@@ -21,6 +21,7 @@ import httpx
 from cli.features import WindowFeatures
 from cli.history import HistoryLogger
 from shared.config import cli as cli_cfg
+from cli.domain_logger import DomainLogger
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,11 @@ class WindowSender:
         self._result_url     = api_base_url.rstrip("/") + "/result"
         self._running        = False
         self._client         = httpx.Client(timeout=_POST_TIMEOUT)
+        self.domain_logger = DomainLogger()
 
         # Keep a reference to features by window_id so the poll thread
         # can hand them to the history logger on completion.
-        self._pending: dict[str, WindowFeatures] = {}
+        self._pending: dict[str, tuple[WindowFeatures, list[str]]] = {}
         self._pending_lock = threading.Lock()
 
     def start(self) -> None:
@@ -71,7 +73,7 @@ class WindowSender:
     def _loop(self) -> None:
         while self._running:
             try:
-                features: WindowFeatures = self.window_queue.get(timeout=0.5)
+                features, domains = self.window_queue.get(timeout=0.5)
             except Empty:
                 continue
 
@@ -81,7 +83,7 @@ class WindowSender:
 
             # Store features so the poll thread can log them on completion
             with self._pending_lock:
-                self._pending[window_id] = features
+                self._pending[window_id] = (features, domains)
 
             # Each window gets its own lightweight poll thread
             t = threading.Thread(
@@ -98,8 +100,8 @@ class WindowSender:
             resp.raise_for_status()
             window_id = resp.json()["window_id"]
             logger.debug("Sent window %s (%d queries)", window_id[:8], features.query_count)
-            print("features: "+str(features.to_dict()))
-            print("window_id: "+window_id)
+            #print("features: "+str(features.to_dict()))
+            #print("window_id: "+window_id)
             return window_id
         except httpx.TimeoutException:
             logger.warning("POST /ingest timed out — window dropped.")
@@ -127,13 +129,20 @@ class WindowSender:
 
                         # Write to history file
                         with self._pending_lock:
-                            features = self._pending.pop(window_id, None)
-                        if features is not None:
+                            entry = self._pending.pop(window_id, None)
+                        if entry is not None:
+                            features, domains = entry
                             self.history_logger.log(features, label, confidence)
+                            self.domain_logger.log_window(
+                                timestamp=features.window_end,
+                                agent_id=features.agent_id,
+                                domains=domains,
+                                label=label,
+                                confidence=confidence,)
 
                         logger.debug("Result %s → %s (%.2f)", window_id[:8], label, confidence)
-                        print("Result for window %s: %s (confidence %.2f)" % (window_id[:8], label, confidence))
-                        print("--------------------------------------------------------")
+                        #print("Result for window %s: %s (confidence %.2f)" % (window_id[:8], label, confidence))
+                        #print("--------------------------------------------------------")
                         return
 
                 except httpx.TimeoutException:
@@ -144,9 +153,29 @@ class WindowSender:
                 time.sleep(cli_cfg.poll_interval_s)
 
         # Timed out
+
         logger.warning("Poll exhausted for %s — marking unknown.", window_id[:8])
-        self.result_callback(window_id, "unknown", 0.0)
+
+        label = "unknown"
+        confidence = 0.0
+
+        self.result_callback(window_id, label, confidence)
+
         with self._pending_lock:
-            features = self._pending.pop(window_id, None)
-        if features is not None:
-            self.history_logger.log(features, "unknown", 0.0)
+            entry = self._pending.pop(window_id, None)
+
+        if entry:
+            features, domains = entry
+
+            try:
+                self.history_logger.log(features, label, confidence)
+
+                self.domain_logger.log_window(
+            timestamp=features.window_end,
+            agent_id=features.agent_id,
+            domains=domains,
+            label=label,
+            confidence=confidence,)
+
+            except Exception as e:
+                logger.exception("Failed writing logs for %s: %s", window_id[:8], e)

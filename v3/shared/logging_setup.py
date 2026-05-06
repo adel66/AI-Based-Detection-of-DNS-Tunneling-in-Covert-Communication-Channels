@@ -37,7 +37,7 @@ def configure_logging(service_name: str = "") -> None:
     )
 
     # Suppress noisy third-party loggers
-    for noisy in ("kafka", "urllib3", "scapy", "asyncio"):
+    for noisy in ("kafka", "urllib3", "scapy", "asyncio", "httpcore", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     logging.getLogger(__name__).info(
