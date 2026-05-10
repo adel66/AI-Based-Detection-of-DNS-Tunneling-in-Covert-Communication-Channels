@@ -112,7 +112,8 @@ class WindowAggregator:
                 agent_id=self.agent_id,
             )
 
-            self.window_queue.put(features)
+            domains = list(set(e.domain for e in events))
+            self.window_queue.put((features, domains))
             self.windows_sent += 1
             logger.debug("Window %s→%s — %d events queued.",
                          window_start.strftime("%H:%M:%S"),
